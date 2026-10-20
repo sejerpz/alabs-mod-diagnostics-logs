@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+#
+# diagnostics-logs - collect a diagnostics report of the MOD Dwarf
+#
+#   diagnostics-logs --list                       sections, as JSON
+#   diagnostics-logs [--sections a,b] [--raw]     the report, as text
+#
+# The report is made of sections, one per provider: an executable in
+# PROVIDERS_DIR, run in name order. The report is anonymized unless --raw is
+# given. See README.md for the provider contract.
+#
+# Runs on the Python 3.4 of the Dwarf: no f-strings, no subprocess.run.
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+BASE_DIR = os.environ.get('DIAGNOSTICS_LOGS_DIR', '/usr/lib/diagnostics-logs')
+PROVIDERS_DIR = os.path.join(BASE_DIR, 'providers.d')
+VERSION_FILE = os.path.join(BASE_DIR, 'VERSION')
+
+RELEASE_DIR = '/etc/mod-release'
+SERIAL_FILE = '/var/cache/mod/tag'
+
+PROVIDER_TIMEOUT = 10
+
+MAC_RE = re.compile(r'\b([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){2})(?::[0-9a-fA-F]{2}){3}\b')
+
+
+def read_file(path, default=''):
+    try:
+        with open(path, 'r') as fh:
+            return fh.read().strip()
+    except (IOError, OSError):
+        return default
+
+
+def run(args, env=None, timeout=PROVIDER_TIMEOUT):
+    """Run a command, return (exit code or None on timeout, stdout, stderr)."""
+    # own process group: on timeout the whole group is killed, otherwise a
+    # child still holding stdout (e.g. a "sleep" of a shell script) would
+    # keep communicate() waiting
+    try:
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env, start_new_session=True)
+    except OSError as e:
+        return (127, '', str(e))
+
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, err = proc.communicate()
+        return (None, out.decode('utf-8', 'replace'), err.decode('utf-8', 'replace'))
+
+    return (proc.returncode, out.decode('utf-8', 'replace'), err.decode('utf-8', 'replace'))
+
+
+def provider_env(redact_file):
+    env = {
+        'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
+        'LC_ALL': 'C',
+        'ALABS_DIAG_REDACT': redact_file,
+    }
+    return env
+
+
+def list_providers():
+    """Providers in name order: [(path, id, title, description)]."""
+    try:
+        names = sorted(os.listdir(PROVIDERS_DIR))
+    except OSError:
+        return []
+
+    providers = []
+    for name in names:
+        path = os.path.join(PROVIDERS_DIR, name)
+        if name.startswith('.') or name.endswith('~') or not os.path.isfile(path) or not os.access(path, os.X_OK):
+            continue
+
+        # default id: the file name without the "NN-" prefix
+        info = {'id': re.sub(r'^\d+-', '', name), 'title': name, 'description': ''}
+
+        code, out, err = run([path, '--describe'], env=provider_env(os.devnull))
+        if code == 0:
+            for line in out.splitlines():
+                key, sep, value = line.partition('=')
+                if sep and key.strip() in info:
+                    info[key.strip()] = value.strip()
+
+        providers.append((path, info['id'], info['title'], info['description']))
+
+    return providers
+
+
+def run_provider(path, redact_file):
+    code, out, err = run([path], env=provider_env(redact_file))
+    text = out.rstrip('\n')
+
+    if code is None:
+        text += '\n[provider timed out after %d s]' % PROVIDER_TIMEOUT
+    elif code != 0:
+        text += '\n[provider failed with exit code %d]' % code
+        err = err.strip()
+        if err:
+            text += '\n' + '\n'.join(err.splitlines()[-5:])
+
+    return text.strip('\n')
+
+
+class Anonymizer(object):
+    """Replaces sensitive strings with stable placeholders."""
+
+    def __init__(self):
+        self.values = {}   # value -> placeholder
+        self.counters = {}
+
+    def add(self, kind, value):
+        value = value.strip()
+        if not value or value in self.values:
+            return
+        if kind == 'serial':
+            self.values[value] = '<serial>'
+            return
+        self.counters[kind] = self.counters.get(kind, 0) + 1
+        self.values[value] = '<%s-%d>' % (kind, self.counters[kind])
+
+    def add_from_file(self, path):
+        for line in read_file(path).splitlines():
+            if not line.strip():
+                continue
+            kind, sep, value = line.partition('\t')
+            if not sep:
+                kind, value = 'redacted', line
+            self.add(kind.strip() or 'redacted', value)
+
+    def apply(self, text):
+        # longest first, so a value contained in another one doesn't break it;
+        # whole words only, so a network named "dwarf" doesn't change "moddwarf"
+        for value in sorted(self.values, key=len, reverse=True):
+            placeholder = self.values[value]
+            text = re.sub(r'(?<![0-9A-Za-z_-])' + re.escape(value) + r'(?![0-9A-Za-z_-])',
+                          lambda m: placeholder, text)
+        # MAC addresses: keep only the vendor part
+        return MAC_RE.sub(lambda m: m.group(1) + ':xx:xx:xx', text)
+
+
+def header(raw):
+    lines = ['# MOD Dwarf diagnostics', '']
+    lines.append('image:            %s' % read_file(os.path.join(RELEASE_DIR, 'release'), 'unknown'))
+    for name in ('system', 'controller'):
+        info = dict(l.partition('=')[::2] for l in read_file(os.path.join(RELEASE_DIR, name)).splitlines())
+        lines.append('%-17s %s' % (name + ':', info.get('revision', 'unknown')))
+    lines.append('diagnostics-logs: %s' % read_file(VERSION_FILE, 'unknown'))
+    lines.append('date:             %s (device clock)' % time.strftime('%Y-%m-%d %H:%M:%S'))
+    uptime = read_file('/proc/uptime').split()
+    if uptime:
+        secs = int(float(uptime[0]))
+        lines.append('uptime:           %dd %02d:%02d' % (secs // 86400, secs % 86400 // 3600, secs % 3600 // 60))
+    lines.append('anonymized:       %s' % ('no' if raw else 'yes'))
+    return '\n'.join(lines)
+
+
+def report(sections, raw):
+    providers = list_providers()
+    if sections:
+        providers = [p for p in providers if p[1] in sections]
+
+    anonymizer = Anonymizer()
+    anonymizer.add('serial', read_file(SERIAL_FILE))
+
+    parts = [header(raw)]
+
+    fd, redact_file = tempfile.mkstemp(prefix='diagnostics-logs-')
+    os.close(fd)
+    try:
+        for path, pid, title, description in providers:
+            # each provider appends the sensitive strings it prints
+            text = run_provider(path, redact_file)
+            parts.append('## %s\n\n```\n%s\n```' % (title, text or '(no output)'))
+        anonymizer.add_from_file(redact_file)
+    finally:
+        os.unlink(redact_file)
+
+    text = '\n\n'.join(parts) + '\n'
+    if not raw:
+        text = anonymizer.apply(text)
+    return text
+
+
+def usage():
+    sys.stderr.write('usage: diagnostics-logs --list | [--sections id,id] [--raw]\n')
+    sys.exit(2)
+
+
+def main(argv):
+    sections = None
+    raw = False
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == '--list':
+            providers = list_providers()
+            print(json.dumps([{'id': p[1], 'title': p[2], 'description': p[3]} for p in providers]))
+            return 0
+        elif arg == '--raw':
+            raw = True
+        elif arg == '--sections' and i + 1 < len(argv):
+            i += 1
+            sections = [s.strip() for s in argv[i].split(',') if s.strip()]
+        else:
+            usage()
+        i += 1
+
+    sys.stdout.write(report(sections, raw))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

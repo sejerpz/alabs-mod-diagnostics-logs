@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# diagnostics-logs provider: system
+
+if [ "$1" = "--describe" ]; then
+    echo "id=system"
+    echo "title=System"
+    echo "description=Device, image and component versions, kernel, uptime, CPU, memory and storage"
+    exit 0
+fi
+
+value()
+{
+    printf '%-21s %s\n' "$1:" "$2"
+}
+
+model=$(sed -n 's/^MODEL_NAME="\(.*\)"/\1/p' /etc/mod-hardware-descriptor.env 2>/dev/null)
+value "device" "${model:-unknown}"
+value "serial" "$(cat /var/cache/mod/tag 2>/dev/null || echo unknown)"
+value "image" "$(cat /etc/mod-release/release 2>/dev/null || echo unknown)"
+for f in system controller restore; do
+    rev=$(sed -n 's/^revision=//p' /etc/mod-release/$f 2>/dev/null)
+    value "$f revision" "${rev:-unknown}"
+done
+value "HMI firmware" "$(cat /usr/share/mod/controller/version 2>/dev/null || echo unknown)"
+value "kernel" "$(uname -r) $(uname -v)"
+value "uptime" "$(uptime)"
+
+temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+[ -n "$temp" ] && value "CPU temperature" "$((temp / 1000)) C"
+freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)
+[ -n "$freq" ] && value "CPU frequency" "$((freq / 1000)) MHz ($(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null))"
+
+echo
+echo "memory:"
+free -m
+echo
+echo "storage:"
+df -h / /data 2>/dev/null

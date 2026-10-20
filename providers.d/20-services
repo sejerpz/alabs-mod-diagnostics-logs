@@ -1,0 +1,25 @@
+#!/bin/bash
+#
+# diagnostics-logs provider: services
+
+if [ "$1" = "--describe" ]; then
+    echo "id=services"
+    echo "title=Services"
+    echo "description=State of the MOD services, failed units and pending jobs"
+    exit 0
+fi
+
+# mod-host runs inside jack2
+for unit in jack2 mod-ui mod-system-control controlchaind dnsmasq avahi-daemon; do
+    printf '%-20s %s\n' "$unit" "$(systemctl is-active $unit.service 2>/dev/null)"
+done
+
+echo
+echo "failed units:"
+failed=$(systemctl --failed --no-legend --no-pager 2>/dev/null)
+echo "${failed:-none}"
+
+echo
+echo "pending jobs:"
+jobs=$(systemctl list-jobs --no-legend --no-pager 2>/dev/null)
+echo "${jobs:-none}"
