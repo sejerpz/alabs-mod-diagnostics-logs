@@ -282,3 +282,12 @@ cp VERSION /usr/lib/diagnostics-logs/
 ```
 
 `DIAGNOSTICS_LOGS_DIR` overrides `/usr/lib/diagnostics-logs`, for testing.
+
+## Licensing
+
+MIT, see `LICENSE`: the runner `diagnostics-logs` and the providers in
+`providers.d/` (`SPDX-License-Identifier` in each file).
+
+A provider shipped by another component keeps the licence of that component:
+the runner only executes it, as a separate program (e.g. `50-wifi` of
+`alabs-mod-wifi` is GPL-2.0-only).
