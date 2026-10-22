@@ -6,7 +6,7 @@
 if [ "$1" = "--describe" ]; then
     echo "id=system"
     echo "title=System"
-    echo "description=Device, image and component versions, kernel, uptime, CPU, memory and storage"
+    echo "description=Device and hardware model, image and component versions, kernel, uptime, CPU, memory and storage"
     exit 0
 fi
 
@@ -15,10 +15,36 @@ value()
     printf '%-21s %s\n' "$1:" "$2"
 }
 
-model=$(sed -n 's/^MODEL_NAME="\(.*\)"/\1/p' /etc/mod-hardware-descriptor.env 2>/dev/null)
+# a variable of the image hardware env, quoted or not
+envvar()
+{
+    sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}\$/\1/p" /etc/mod-hardware-descriptor.env 2>/dev/null | head -1
+}
+
+# the hardware descriptor mod-ui reads. Through python3, not sed: "name" is
+# also a key of every actuator
+hwdesc=$(python3 -c '
+import json
+try:
+    with open("/etc/mod-hardware-descriptor.json") as fh:
+        d = json.load(fh)
+except (IOError, OSError, ValueError):
+    d = {}
+print("platform %s, %s, bin-compat %s" % (d.get("platform") or "unknown",
+      d.get("architecture") or "unknown", d.get("bin-compat") or "unknown"))
+' 2>/dev/null)
+
+model=$(envvar MODEL_NAME)
+model_type=$(envvar MODEL_TYPE)
+model_cpu=$(envvar MODEL_CPU)
 value "device" "${model:-unknown}"
+value "hardware" "${hwdesc:-unknown}"
+value "model" "${model_type:-unknown} (cpu ${model_cpu:-unknown})"
 value "serial" "$(cat /var/cache/mod/tag 2>/dev/null || echo unknown)"
 value "image" "$(cat /etc/mod-release/release 2>/dev/null || echo unknown)"
+# "generated=<date> at <build host>": the build host says nothing useful
+built=$(sed -n 's/^generated=//p' /etc/mod-release/system 2>/dev/null | sed 's/ at .*//')
+value "image built" "${built:-unknown}"
 for f in system controller restore; do
     rev=$(sed -n 's/^revision=//p' /etc/mod-release/$f 2>/dev/null)
     value "$f revision" "${rev:-unknown}"

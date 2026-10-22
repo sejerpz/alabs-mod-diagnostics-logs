@@ -1,7 +1,7 @@
 # alabs-mod-diagnostics-logs
 
 Diagnostics report of the MOD Dwarf, ready to be pasted in a
-forum post: device and image versions, services, USB devices and whatever
+forum post: device and image versions, services, audio, USB devices and whatever
 other component installs a *provider* (e.g. the WiFi section of `alabs-mod-wifi`).
 
 The report is **anonymized by default**: no passwords or configuration files
@@ -17,7 +17,7 @@ page of the aLabs custom images wiki.
 | Path | Installed as | Content |
 |---|---|---|
 | `diagnostics-logs` | `/usr/bin/diagnostics-logs` | the runner (Python 3.4) |
-| `providers.d/` | `/usr/lib/diagnostics-logs/providers.d/` | the base providers: system, services, usb |
+| `providers.d/` | `/usr/lib/diagnostics-logs/providers.d/` | the base providers: system, services, audio, usb |
 | `VERSION` | `/usr/lib/diagnostics-logs/VERSION` | version shown in the report header |
 
 ## Usage
@@ -114,7 +114,7 @@ Details of the anonymization:
 A provider is a script that prints some text. To add a section to the report:
 
 1. **Choose the name**: `NN-name`, where `NN` gives the position in the
-   report. The base providers use `10` to `30`; components installed on top
+   report. The base providers use `10` to `40`; components installed on top
    of the image use `50` and above (e.g. `50-wifi` of `alabs-mod-wifi`).
 2. **Implement `--describe`**: print `id`, `title` and `description`. Keep it
    fast and static: it is run every time the settings page is opened.

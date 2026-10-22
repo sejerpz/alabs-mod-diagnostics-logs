@@ -1,0 +1,98 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+#
+# diagnostics-logs provider: audio
+#
+# JACK as configured and as running, the sound card, the realtime threads
+# and the logs of jack2 (mod-host runs inside it) and mod-ui. Read only: the
+# jack tools are never allowed to start a server.
+
+if [ "$1" = "--describe" ]; then
+    echo "id=audio"
+    echo "title=Audio"
+    echo "description=JACK settings and state, sound card, realtime threads, xruns, jack2/mod-host and mod-ui logs"
+    exit 0
+fi
+
+value()
+{
+    printf '%-21s %s\n' "$1:" "$2"
+}
+
+export JACK_NO_START_SERVER=1
+
+# --- configuration: the options mod-jackd reads from /data
+if [ -f /data/using-256-frames ]; then
+    frames=256
+elif [ -f /data/using-64-frames ]; then
+    frames="64 (unstable)"
+else
+    frames=128
+fi
+value "configured buffer" "$frames frames"
+[ -f /data/jack-buffer-size ] && value "saved buffer size" "$(cat /data/jack-buffer-size) frames (/data/jack-buffer-size)"
+value "sync mode" "$([ -f /data/jack-sync-mode ] && echo on || echo off)"
+
+# --- the running server
+echo
+value "jack2" "$(systemctl is-active jack2.service 2>/dev/null)"
+jackpid=$(systemctl show -p MainPID jack2.service 2>/dev/null | sed 's/^MainPID=//')
+if [ -n "$jackpid" ] && [ "$jackpid" != 0 ] && [ -r /proc/$jackpid/cmdline ]; then
+    value "jackd command" "$(tr '\0' ' ' < /proc/$jackpid/cmdline | sed 's/ $//')"
+    value "buffer size" "$(timeout 3 jack_bufsize 2>/dev/null || echo unknown)"
+    value "sample rate" "$(timeout 3 jack_samplerate 2>/dev/null || echo unknown)"
+    # jack_cpu_load prints once a second until killed: the first line is enough
+    load=$(timeout 3 jack_cpu_load 2>/dev/null | awk '{ printf "%.1f%%", $NF; exit }')
+    value "DSP load" "${load:-unknown}"
+else
+    jackpid=
+fi
+
+echo
+echo "internal clients (/etc/jack-internal-session.conf):"
+sed 's/^/  /' /etc/jack-internal-session.conf 2>/dev/null || echo "  none"
+
+# --- sound card: what ALSA really opened
+echo
+echo "sound cards:"
+sed 's/^/  /' /proc/asound/cards 2>/dev/null
+for pcm in /proc/asound/card0/pcm0p /proc/asound/card0/pcm0c; do
+    [ -r $pcm/sub0/hw_params ] || continue
+    params=$(grep -E '^(format|channels|rate|period_size|buffer_size):' $pcm/sub0/hw_params | sed 's/: /=/' | tr '\n' ' ')
+    case $pcm in *p) dir=playback ;; *) dir=capture ;; esac
+    printf '  %-9s %s\n' "$dir" "${params:-closed}"
+done
+
+# --- realtime threads: priority 80 for jackd, MOD_PLUGIN_THREAD_PRIORITY for the plugin workers
+if [ -n "$jackpid" ]; then
+    echo
+    echo "jackd realtime threads:"
+    ps -L --no-headers -o tid,cls,rtprio,pcpu,comm -p $jackpid 2>/dev/null | awk '$2 == "FF" || $2 == "RR" { printf "  %-7s %s %3s %5s%%  %s\n", $1, $2, $3, $4, $5 }'
+fi
+echo
+echo "processes:"
+ps -e --no-headers -o pid,ni,pcpu,rss,comm 2>/dev/null | awk '$5 ~ /^(jackd|mod-ui|mod-host|mod-system-cont|controlchaind)/ { printf "  %-6s nice %3s  cpu %5s%%  rss %6d kB  %s\n", $1, $2, $3, $4, $5 }'
+
+# --- xruns and logs of this boot
+echo
+value "xruns logged" "$(journalctl -b --no-pager -u jack2.service 2>/dev/null | grep -ci xrun)"
+
+echo
+echo "kernel log (last 15 lines about audio):"
+lines=$(dmesg 2>/dev/null | grep -iE "snd|asoc|alsa|codec|i2s|xrun|underrun|overrun" | tail -15)
+echo "${lines:-  none}"
+
+# journalctl 219: no "-- Logs begin" header, one call per unit
+journal()
+{
+    local lines
+    echo
+    echo "journal $1 (last $2 lines):"
+    lines=$(journalctl -b --no-pager -o short-monotonic -n $2 -u $1 2>/dev/null | grep -v '^-- ')
+    echo "${lines:-  none}"
+}
+
+journal jack2.service 25
+journal mod-ui.service 25
+
+exit 0
