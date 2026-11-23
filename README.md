@@ -17,7 +17,7 @@ page of the aLabs custom images wiki.
 | Path | Installed as | Content |
 |---|---|---|
 | `diagnostics-logs` | `/usr/bin/diagnostics-logs` | the runner (Python 3.4) |
-| `providers.d/` | `/usr/lib/diagnostics-logs/providers.d/` | the base providers: system, services, audio, usb |
+| `providers.d/` | `/usr/lib/diagnostics-logs/providers.d/` | the base providers: system, services, usb, midi, audio |
 | `VERSION` | `/usr/lib/diagnostics-logs/VERSION` | version shown in the report header |
 
 ## Usage

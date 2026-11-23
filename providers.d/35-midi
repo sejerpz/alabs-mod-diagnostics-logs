@@ -1,0 +1,95 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+#
+# diagnostics-logs provider: midi
+#
+# The MIDI ports of JACK and their connections: the DIN port of the Dwarf
+# (ttymidi), USB MIDI devices (ALSA sequencer, jackd -X seq), the merger and
+# broadcaster of the aggregated mode and the plugin inputs. Read only: the
+# jack tools are never allowed to start a server.
+
+if [ "$1" = "--describe" ]; then
+    echo "id=midi"
+    echo "title=MIDI"
+    echo "description=MIDI mode, MIDI devices seen by ALSA, MIDI ports of JACK and their connections"
+    exit 0
+fi
+
+value()
+{
+    printf '%-21s %s\n' "$1:" "$2"
+}
+
+export JACK_NO_START_SERVER=1
+
+# --- ALSA: USB MIDI devices become sequencer clients, bridged to JACK by jackd -X seq
+echo "ALSA sequencer clients:"
+lines=$(grep -E '^Client +[0-9]' /proc/asound/seq/clients 2>/dev/null | grep -vE '"(System|Midi Through)"' | sed 's/^/  /')
+echo "${lines:-  none}"
+
+# --- JACK
+echo
+if [ "$(systemctl is-active jack2.service 2>/dev/null)" != active ]; then
+    echo "jack2 not running"
+    exit 0
+fi
+
+ports=$(timeout 3 jack_lsp -t 2>/dev/null)
+connections=$(timeout 3 jack_lsp -c 2>/dev/null)
+aliases=$(timeout 3 jack_lsp -A 2>/dev/null)
+properties=$(timeout 3 jack_lsp -p 2>/dev/null)
+
+# port names, in jack order, of the MIDI type only
+midiports=$(echo "$ports" | awk '
+    /^\t/ { if ($0 ~ /midi/) print name; next }
+    { name = $0 }')
+
+if [ -z "$midiports" ]; then
+    echo "no MIDI ports in JACK"
+    exit 0
+fi
+
+has_port()
+{
+    echo "$midiports" | grep -qxF "$1"
+}
+
+# aggregated mode: mod-host and the plugins get the MIDI of all the devices from mod-midi-merger
+if echo "$connections" | awk '$0 == "mod-host:midi_in" { p = 1; next } /^ / { if (p && $1 == "mod-midi-merger:out") f = 1; next } { p = 0 } END { exit !f }'; then
+    mode=aggregated
+elif has_port mod-host:midi_in; then
+    mode=separated
+else
+    mode=unknown
+fi
+value "MIDI mode" "$mode"
+value "DIN port (ttymidi)" "$(has_port ttymidi:MIDI_in && echo present || echo missing)"
+value "merger" "$(has_port mod-midi-merger:out && echo present || echo missing)"
+value "broadcaster" "$(has_port mod-midi-broadcaster:in && echo present || echo missing)"
+for opt in midi-feedback midi-feedback-sync midi-nrpn; do
+    value "$opt" "$([ -f /data/$opt ] && echo on || echo off)"
+done
+
+# every MIDI port, with its direction, its alias (the device name of system:midi_*) and its connections;
+# the ports of the plugins only when connected, a pedalboard can have many
+echo
+echo "MIDI ports and connections (out: sends MIDI, in: receives MIDI):"
+echo "$midiports" | while read -r port; do
+    conns=$(echo "$connections" | awk -v p="$port" '$0 == p { f = 1; next } /^ / { if (f) print $1; next } { f = 0 }')
+    case "$port" in
+        effect_*) [ -n "$conns" ] || continue ;;
+    esac
+    alias=$(echo "$aliases" | awk -v p="$port" '$0 == p { f = 1; next } /^ / { if (f) { sub(/^ +/, ""); print; exit } next } { f = 0 }')
+    dir=$(echo "$properties" | awk -v p="$port" '$0 == p { f = 1; next } /^\t/ { if (f) { print ($0 ~ /input/) ? "in " : "out"; exit } next } { f = 0 }')
+    echo "  ${dir:-   } $port${alias:+  ($alias)}"
+    if [ -n "$conns" ]; then
+        echo "$conns" | sed 's/^/        <-> /'
+    fi
+done
+
+echo
+echo "journal jack2.service (last 10 lines about MIDI):"
+lines=$(journalctl -b --no-pager -o short-monotonic -u jack2.service 2>/dev/null | grep -v '^-- ' | grep -iE 'midi|ttymidi|seq' | tail -10)
+echo "${lines:-  none}"
+
+exit 0
